@@ -3,6 +3,7 @@
 #include <QSerialPortInfo>
 #include <QTimer>
 #include <QVariant>
+#include <QCoreApplication>
 
 #include "OBDDevice.h"
 
@@ -65,15 +66,17 @@ void AppContext::setMessage(QString message)
 
 void AppContext::tryConnect()
 {
-    const auto& ports = QSerialPortInfo::availablePorts();
-    if (ports.size() != 1) {
-        startErrorTimeout(tr("No serial ports found"));
-        return;
-    }
+//    const auto& ports = QSerialPortInfo::availablePorts();
+//    if (ports.size() != 1) {
+//        startErrorTimeout(tr("No serial ports found"));
+//        return;
+//    }
+//    const auto& port = ports.first();
+//    const auto portName = port.portName();
 
-    const auto& port = ports.first();
-    if (!device_->open(port.portName())) {
-        startErrorTimeout(tr("Cannot open port: %1").arg(port.portName()));
+    const auto portName = QCoreApplication::arguments().at(1);
+    if (!device_->open(portName)) {
+        startErrorTimeout(tr("Cannot open port: %1").arg(portName));
         return;
     }
 
