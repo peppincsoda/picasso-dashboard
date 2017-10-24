@@ -54,6 +54,7 @@ private:
     int remaining_seconds_;
     QString error_message_;
 
+    bool querying_;
     QTimer* query_timer_;
 };
 

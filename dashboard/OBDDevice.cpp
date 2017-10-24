@@ -2,6 +2,7 @@
 
 #include <QtSerialPort/QSerialPort>
 #include <QVariant>
+#include <QTimer>
 
 #include <cassert>
 
@@ -19,18 +20,30 @@ namespace obdlib {
 
         bool queryValue(PID pid);
 
+    Q_SIGNALS:
+        void internalSignalOnOpen(bool ok);
+        void internalSignalOnQueryValue(bool ok, int pid, const QVariant& value);
+
     private Q_SLOTS:
         void onReadyRead();
+        void onTimeout();
 
     private:
-        bool send(const char* str, bool (Impl::*cb)(const char*));
+        bool send(const char* cmd,
+                  bool (Impl::*line_cb)(const char *),
+                  bool (Impl::*ready_cb)(),
+                  void (Impl::*error_cb)());
 
-        void processLine(const char* str);
-        bool onATZ(const char* resp);
-        bool onATAL(const char* resp);
-        bool onATSP0(const char* resp);
+        void processLine(const char* line);
+        void processPrompt();
+        bool onATZLine(const char* line);
+        bool onATZReady();
+        bool onOKLine(const char* line);
+        bool onATALReady();
+        bool onATSP0Ready();
         void openFailed();
-        bool onQuery(const char* resp);
+        bool onQueryLine(const char* line);
+        bool onQueryReady();
         void queryFailed();
 
         OBDDevice* interface_;
@@ -39,9 +52,18 @@ namespace obdlib {
 
         QByteArray read_buffer_;
 
-        // Callback's return value indicates whether
-        // the current callback should be cleared
-        bool (OBDDevice::Impl::*current_cb_)(const char*);
+        //! Last command to recognize echo
+        QByteArray current_cmd_;
+        //! Last query PID
+        int current_pid_;
+
+        bool (Impl::*line_cb_)(const char *);
+        bool (Impl::*ready_cb_)();
+        void (Impl::*error_cb_)();
+        bool error_on_read_;
+
+        //! Timeout timer for the active command
+        QTimer* timeout_timer_;
     };
 
 
@@ -84,10 +106,28 @@ namespace obdlib {
         , interface_(interface)
         , sp_()
         , read_buffer_()
-        , current_cb_(nullptr)
+        , current_cmd_()
+        , current_pid_(PID_Invalid)
+        , line_cb_(nullptr)
+        , ready_cb_(nullptr)
+        , error_cb_(nullptr)
+        , error_on_read_(false)
+        , timeout_timer_(nullptr)
     {
         connect(&sp_, SIGNAL(readyRead()),
                 this, SLOT(onReadyRead()));
+
+        timeout_timer_ = new QTimer(this);
+        timeout_timer_->setInterval(3000);
+        timeout_timer_->setSingleShot(true);
+        connect(timeout_timer_, SIGNAL(timeout()),
+                this, SLOT(onTimeout()));
+
+        // All signals emitted by the device are deferred
+        connect(this, SIGNAL(internalSignalOnOpen(bool)),
+                interface_, SIGNAL(onOpen(bool)), Qt::QueuedConnection);
+        connect(this, SIGNAL(internalSignalOnQueryValue(bool,int,QVariant)),
+                interface_, SIGNAL(onQueryValue(bool,int,QVariant)), Qt::QueuedConnection);
     }
 
     OBDDevice::Impl::~Impl()
@@ -97,7 +137,7 @@ namespace obdlib {
 
     bool OBDDevice::Impl::open(const QString& name)
     {
-        if (current_cb_ != nullptr)
+        if (line_cb_ != nullptr)
             return false;
         if (sp_.isOpen())
             return false;
@@ -107,105 +147,187 @@ namespace obdlib {
         bool r = true;
         r = r && sp_.setBaudRate(QSerialPort::Baud38400);
         r = r && sp_.setDataBits(QSerialPort::Data8);
-        r = r && sp_.setParity(QSerialPort::EvenParity);
+        r = r && sp_.setParity(QSerialPort::NoParity);
         r = r && sp_.setStopBits(QSerialPort::OneStop);
         r = r && sp_.setFlowControl(QSerialPort::NoFlowControl);
 
         r = r && sp_.open(QSerialPort::ReadWrite);
-        r = r && send("ATZ", &Impl::onATZ);
+        r = r && send("ATZ",
+                      &Impl::onATZLine,
+                      &Impl::onATZReady,
+                      &Impl::openFailed);
         if (!r)
             sp_.close();
         return r;
     }
 
-    bool OBDDevice::Impl::send(const char* str, bool (Impl::*cb)(const char*))
+    bool OBDDevice::Impl::send(const char* cmd,
+                               bool (Impl::*line_cb)(const char *),
+                               bool (Impl::*ready_cb)(),
+                               void (Impl::*error_cb)())
     {
-        assert(current_cb_ == nullptr);
+        assert(line_cb_ == nullptr);
+        assert(ready_cb_ == nullptr);
+        assert(error_cb_ == nullptr);
 
         QByteArray buffer;
-        buffer.append(str); // TODO: TEST
+        buffer.append(cmd);
         buffer.append('\r');
-
         if (sp_.write(buffer) != buffer.size())
             return false;
 
-        current_cb_ = cb;
+        current_cmd_ = cmd;
+        line_cb_ = line_cb;
+        ready_cb_ = ready_cb;
+        error_cb_ = error_cb;
+        timeout_timer_->start();
         return true;
     }
 
     void OBDDevice::Impl::onReadyRead()
     {
-        const auto buffer_size = read_buffer_.size();
+        // Process all non-empty response lines one-by-one
+        int from = read_buffer_.size();
         read_buffer_.append(sp_.readAll());
-        const auto len = read_buffer_.indexOf('\r', buffer_size);
-        if (len != -1) {
-            read_buffer_[len] = 0;
-            processLine(read_buffer_.constData());
+        for (;;) {
+            const auto len = read_buffer_.indexOf('\r', from);
+            if (len == -1)
+                break;
+
+            if (len > 0) {
+                read_buffer_[len] = 0;
+                processLine(read_buffer_.constData());
+            }
             read_buffer_.remove(0, len + 1);
+            from = 0;
+        }
+
+        // Process prompt sign
+        if (read_buffer_.size() == 1 &&
+            read_buffer_[0] == '>') {
+            read_buffer_.clear();
+            processPrompt();
         }
     }
 
-    void OBDDevice::Impl::processLine(const char* str)
+    void OBDDevice::Impl::processLine(const char* line)
     {
-        assert(current_cb_ != nullptr);
-        const auto current_cb = current_cb_;
-        current_cb_ = nullptr;
-        if (!(this->*current_cb)(str))
-            current_cb_ = current_cb; // Keep the current operation
+        assert(line_cb_ != nullptr);
+        assert(error_cb_ != nullptr);
+
+        // Skip echo from the device
+        if (strcmp(line, current_cmd_.constData()) == 0)
+            return;
+
+        if (!error_on_read_) {
+            if (!(this->*line_cb_)(line)) {
+                error_on_read_ = true;
+                (this->*error_cb_)();
+            }
+        }
     }
 
-    bool OBDDevice::Impl::onATZ(const char* resp)
+    void OBDDevice::Impl::processPrompt()
     {
-        if (strcmp(resp, "OK") != 0 ||
-            !send("ATAL", &Impl::onATAL))
-                openFailed();
-        return true;
+        assert(ready_cb_ != nullptr);
+        assert(error_cb_ != nullptr);
+
+        timeout_timer_->stop();
+
+        line_cb_ = nullptr;
+        const auto ready_cb = ready_cb_;
+        ready_cb_ = nullptr;
+        const auto error_cb = error_cb_;
+        error_cb_ = nullptr;
+
+        if (!error_on_read_) {
+            if (!(this->*ready_cb)()) {
+                error_on_read_ = true;
+                (this->*error_cb)();
+            }
+        }
+
+        // Command processing is finished here, reset the error flag
+        error_on_read_ = false;
     }
 
-    bool OBDDevice::Impl::onATAL(const char* resp)
+    void OBDDevice::Impl::onTimeout()
     {
-        if (strcmp(resp, "OK") != 0 ||
-            !send("ATSP0", &Impl::onATSP0))
-                openFailed();
-        return true;
+        error_on_read_ = true;
+        (this->*error_cb_)();
     }
 
-    bool OBDDevice::Impl::onATSP0(const char* resp)
+    bool OBDDevice::Impl::onATZLine(const char* line)
     {
-        if (strcmp(resp, "OK") != 0)
-            openFailed();
+        static const char id_str[] = "ELM327";
 
-        emit interface_->onOpen(true);
+        return strncmp(line, id_str, sizeof(id_str) - 1) == 0;
+    }
+
+    bool OBDDevice::Impl::onATZReady()
+    {
+        return send("ATAL",
+                    &Impl::onOKLine,
+                    &Impl::onATALReady,
+                    &Impl::openFailed);
+    }
+
+    bool OBDDevice::Impl::onOKLine(const char* line)
+    {
+        return strcmp(line, "OK") == 0;
+    }
+
+    bool OBDDevice::Impl::onATALReady()
+    {
+        return send("ATSP0",
+                    &Impl::onOKLine,
+                    &Impl::onATSP0Ready,
+                    &Impl::openFailed);
+    }
+
+    bool OBDDevice::Impl::onATSP0Ready()
+    {
+        emit internalSignalOnOpen(true);
         return true;
     }
 
     void OBDDevice::Impl::openFailed()
     {
         sp_.close();
-        emit interface_->onOpen(false);
+        emit internalSignalOnOpen(false);
     }
 
     void OBDDevice::Impl::close()
     {
         sp_.close();
-        current_cb_ = nullptr;
+        read_buffer_.clear();
+        current_cmd_.clear();
+        line_cb_ = nullptr;
+        ready_cb_ = nullptr;
+        error_cb_ = nullptr;
+        timeout_timer_->stop();
     }
 
     bool OBDDevice::Impl::queryValue(PID pid)
     {
-        if (current_cb_ != nullptr)
+        if (line_cb_ != nullptr)
             return false;
-        if (sp_.isOpen())
+        if (!sp_.isOpen())
             return false;
         if (sp_.error() != QSerialPort::NoError)
             return false;
+
+        current_pid_ = pid;
 
         const auto cmd = QString("%1%2")
                 .arg(static_cast<char>(OBDBytes::ShowCurrentMode), 2, 16, QChar('0'))
                 .arg(static_cast<char>(pid), 2, 16, QChar('0'))
                 .toLatin1();
 
-        return send(cmd.data(), &Impl::onQuery);
+        return send(cmd.data(),
+                    &Impl::onQueryLine,
+                    &Impl::onQueryReady,
+                    &Impl::queryFailed);
     }
 
     static inline int getHexDigitValue(char c)
@@ -238,12 +360,14 @@ namespace obdlib {
         return r;
     }
 
-    bool OBDDevice::Impl::onQuery(const char* resp)
+    bool OBDDevice::Impl::onQueryLine(const char* line)
     {
-        if (strcmp(resp, "SEARCHING...") == 0)
+        if (strcmp(line, "SEARCHING...") == 0)
+            return true;
+        if (strcmp(line, "UNABLE TO CONNECT") == 0)
             return false;
 
-        const auto buffer = readHexBytes(resp);
+        const auto buffer = readHexBytes(line);
         const auto len = buffer.size();
 
         if (len >= 2) {
@@ -267,21 +391,24 @@ namespace obdlib {
                 }
 
                 if (!value.isNull()) {
-                    emit interface_->onQueryValue(true, pid, value);
-                } else {
-                    queryFailed();
+                    emit internalSignalOnQueryValue(true, pid, value);
+                    return true;
                 }
             }
-        } else {
-            queryFailed();
         }
+
+        return false;
+    }
+
+    bool OBDDevice::Impl::onQueryReady()
+    {
         return true;
     }
 
     void OBDDevice::Impl::queryFailed()
     {
         sp_.close();
-        emit interface_->onQueryValue(false, PID_Invalid, QVariant());
+        emit internalSignalOnQueryValue(false, current_pid_, QVariant());
     }
 }
 

@@ -14,15 +14,20 @@ AppContext::AppContext(QObject* parent)
     , error_timer_(nullptr)
     , remaining_seconds_(0)
     , error_message_()
+    , querying_(false)
     , query_timer_(nullptr)
 {
     connect(device_.get(), SIGNAL(onOpen(bool)),
             this, SLOT(onDeviceOpen(bool)));
+    connect(device_.get(), SIGNAL(onQueryValue(bool, int, const QVariant&)),
+            this, SLOT(onDeviceQuery(bool, int, const QVariant&)));
 
     error_timer_ = new QTimer(this);
+    error_timer_->setInterval(1000);
     connect(error_timer_, SIGNAL(timeout()),
             this, SLOT(onErrorTimer()));
     query_timer_ = new QTimer(this);
+    query_timer_->setInterval(100);
     connect(query_timer_, SIGNAL(timeout()),
             this, SLOT(onQueryTimer()));
 }
@@ -78,7 +83,7 @@ void AppContext::tryConnect()
 void AppContext::startErrorTimeout(const QString& error_message)
 {
     error_message_ = error_message;
-    error_timer_->start(1000);
+    error_timer_->start();
     remaining_seconds_ = 5;
     updateErrorMessage();
 }
@@ -108,19 +113,23 @@ void AppContext::onDeviceOpen(bool ok)
     }
 
     setMessage("");
-    query_timer_->start(100);
+    query_timer_->start();
 }
 
 void AppContext::onQueryTimer()
 {
+    if (querying_)
+        return;
     if (!device_->queryValue(obdlib::OBDDevice::PID_EngineRPM)) {
         queryFailed();
         return;
     }
+    querying_ = true;
 }
 
 void AppContext::onDeviceQuery(bool ok, int pid, const QVariant& value)
 {
+    querying_ = false;
     if (!ok) {
         queryFailed();
         return;
