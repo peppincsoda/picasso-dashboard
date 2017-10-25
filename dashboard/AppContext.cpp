@@ -1,6 +1,5 @@
 #include "AppContext.h"
 
-#include <QSerialPortInfo>
 #include <QTimer>
 #include <QVariant>
 #include <QCoreApplication>
@@ -83,11 +82,11 @@ void AppContext::tryConnect()
 {
     const auto portName = QCoreApplication::arguments().at(1);
     if (!device_->open(portName)) {
-        startErrorTimeout(tr("Cannot open port: %1").arg(portName));
+        openFailed();
         return;
     }
 
-    setMessage(tr("Initializing..."));
+    setMessage(tr("Opening port..."));
 }
 
 void AppContext::startErrorTimeout(const QString& error_message)
@@ -111,14 +110,14 @@ void AppContext::onErrorTimer()
 
 void AppContext::updateErrorMessage()
 {
-    setMessage(tr("ERROR: %1,<br>retrying in %2 second(s)...")
+    setMessage(tr("ERROR: %1,<br>reconnecting in %2 second(s)...")
                .arg(error_message_, QString::number(remaining_seconds_)));
 }
 
 void AppContext::onDeviceOpen(bool ok)
 {
     if (!ok) {
-        tryConnect();
+        openFailed();
         return;
     }
 
@@ -144,6 +143,12 @@ void AppContext::onDeviceQuery(bool ok, int /* pid */, const QVariant& value)
         queryFailed();
         return;
     }
+}
+
+void AppContext::openFailed()
+{
+    const auto portName = QCoreApplication::arguments().at(1);
+    startErrorTimeout(tr("Cannot open port: %1").arg(portName));
 }
 
 void AppContext::queryFailed()

@@ -47,6 +47,7 @@ private:
     void tryConnect();
     void startErrorTimeout(const QString& error_message);
     void updateErrorMessage();
+    void openFailed();
     void queryFailed();
 
     int rpmValue_;

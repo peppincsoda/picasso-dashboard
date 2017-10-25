@@ -6,8 +6,7 @@
 
 #include <cassert>
 #include <queue>
-
-#include <QDebug>
+#include <iostream>
 
 namespace obdlib {
 
@@ -118,7 +117,7 @@ namespace obdlib {
                 this, SLOT(onReadyRead()));
 
         timeout_timer_ = new QTimer(this);
-        timeout_timer_->setInterval(3000);
+        timeout_timer_->setInterval(10000);
         timeout_timer_->setSingleShot(true);
         connect(timeout_timer_, SIGNAL(timeout()),
                 this, SLOT(onTimeout()));
@@ -188,12 +187,18 @@ namespace obdlib {
 
     void OBDDeviceImpl::onReadyRead()
     {
-        int from = read_buffer_.size();
-        read_buffer_.append(sp_.readAll());
+        auto new_buffer = sp_.readAll();
+
+        std::cout << QString::fromLatin1(new_buffer.constData())
+                     .replace("\r", "\r\n")
+                     .toLatin1()
+                     .constData();
+
+        read_buffer_.append(std::move(new_buffer));
 
         for (;;) {
             // Look for the prompt sign
-            const auto len = read_buffer_.indexOf("\r>", from);
+            const auto len = read_buffer_.indexOf("\r>");
             if (len == -1)
                 break;
 
@@ -201,14 +206,11 @@ namespace obdlib {
                 processResponse(read_buffer_.left(len));
             }
             read_buffer_.remove(0, len + 2);
-            from = 0;
         }
     }
 
     void OBDDeviceImpl::processResponse(const QByteArray& buffer)
     {
-        //qDebug() << buffer;
-
         assert(!cmd_queue_.empty());
         const auto& active_cmd = cmd_queue_.front();
 
@@ -374,11 +376,12 @@ namespace obdlib {
                 switch (pid) {
                 case OBDDevice::PID_EngineRPM:
                     if (len >= 4)
-                        value = (buffer[2] * 256 + buffer[3]) / 4;
+                        value = (static_cast<std::uint8_t>(buffer[2]) * 256 +
+                                static_cast<std::uint8_t>(buffer[3])) / 4;
                     break;
                 case OBDDevice::PID_VehicleSpeed:
                     if (len >= 3)
-                        value = buffer[2];
+                        value = static_cast<std::uint8_t>(buffer[2]);
                     break;
                 default:
                     assert(0);
