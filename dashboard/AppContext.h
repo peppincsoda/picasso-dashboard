@@ -37,7 +37,6 @@ private Q_SLOTS:
     void onDeviceOpen(bool ok);
     void onDeviceQuery(bool ok, int pid, const QVariant& value);
     void onErrorTimer();
-    void onQueryTimer();
     void onFpsTimer();
 
 private:
@@ -59,9 +58,6 @@ private:
     QTimer* error_timer_;
     int remaining_seconds_;
     QString error_message_;
-
-    bool querying_;
-    QTimer* query_timer_;
 
     QTimer* fps_timer_;
     int num_queries_;

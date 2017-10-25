@@ -16,8 +16,6 @@ AppContext::AppContext(QObject* parent)
     , error_timer_(nullptr)
     , remaining_seconds_(0)
     , error_message_()
-    , querying_(false)
-    , query_timer_(nullptr)
     , fps_timer_(nullptr)
     , num_queries_(0)
 {
@@ -30,10 +28,6 @@ AppContext::AppContext(QObject* parent)
     error_timer_->setInterval(1000);
     connect(error_timer_, SIGNAL(timeout()),
             this, SLOT(onErrorTimer()));
-    query_timer_ = new QTimer(this);
-    query_timer_->setInterval(100);
-    connect(query_timer_, SIGNAL(timeout()),
-            this, SLOT(onQueryTimer()));
     fps_timer_ = new QTimer(this);
     fps_timer_->setInterval(1000);
     connect(fps_timer_, SIGNAL(timeout()),
@@ -87,14 +81,6 @@ void AppContext::setFpsValue(int fpsValue)
 
 void AppContext::tryConnect()
 {
-//    const auto& ports = QSerialPortInfo::availablePorts();
-//    if (ports.size() != 1) {
-//        startErrorTimeout(tr("No serial ports found"));
-//        return;
-//    }
-//    const auto& port = ports.first();
-//    const auto portName = port.portName();
-
     const auto portName = QCoreApplication::arguments().at(1);
     if (!device_->open(portName)) {
         startErrorTimeout(tr("Cannot open port: %1").arg(portName));
@@ -137,30 +123,19 @@ void AppContext::onDeviceOpen(bool ok)
     }
 
     setMessage("");
-    query_timer_->start();
-}
 
-void AppContext::onQueryTimer()
-{
-    if (querying_)
-        return;
     if (!device_->queryValue(obdlib::OBDDevice::PID_EngineRPM)) {
         queryFailed();
         return;
     }
-    querying_ = true;
 }
 
-void AppContext::onDeviceQuery(bool ok, int pid, const QVariant& value)
+void AppContext::onDeviceQuery(bool ok, int /* pid */, const QVariant& value)
 {
-    querying_ = false;
     if (!ok) {
         queryFailed();
         return;
     }
-
-    if (pid != obdlib::OBDDevice::PID_EngineRPM)
-        return;
 
     setRpmValue(value.toInt());
     num_queries_++;
@@ -173,7 +148,6 @@ void AppContext::onDeviceQuery(bool ok, int pid, const QVariant& value)
 
 void AppContext::queryFailed()
 {
-    query_timer_->stop();
     device_->close();
     startErrorTimeout(tr("Parameter query failed"));
 }
