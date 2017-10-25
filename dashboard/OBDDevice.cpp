@@ -5,45 +5,59 @@
 #include <QTimer>
 
 #include <cassert>
+#include <queue>
+
+#include <QDebug>
 
 namespace obdlib {
 
-    class OBDDevice::Impl : public QObject
+    class OBDDeviceImpl : public QObject
     {
         Q_OBJECT
     public:
-        explicit Impl(OBDDevice* interface);
-        ~Impl();
+        explicit OBDDeviceImpl(OBDDevice* interface);
+        ~OBDDeviceImpl();
 
         bool open(const QString& name);
         void close();
 
-        bool queryValue(PID pid);
+        bool queryValue(OBDDevice::PID pid);
 
     Q_SIGNALS:
-        void internalSignalOnOpen(bool ok);
-        void internalSignalOnQueryValue(bool ok, int pid, const QVariant& value);
+        void queueOnOpenSignal(bool ok);
+        void queueOnQueryValueSignal(bool ok, int pid, const QVariant& value);
 
     private Q_SLOTS:
         void onReadyRead();
         void onTimeout();
 
     private:
-        bool send(const char* cmd,
-                  bool (Impl::*line_cb)(const char *),
-                  bool (Impl::*ready_cb)(),
-                  void (Impl::*error_cb)());
+        enum class OBDBytes : char
+        {
+            ShowCurrentMode = 0x01,
+            ReplyCurrentMode = 0x41,
+        };
 
-        void processLine(const char* line);
-        void processPrompt();
+        struct Command
+        {
+            QString cmd_str_;
+            bool (OBDDeviceImpl::*line_cb_)(const char *);
+            void (OBDDeviceImpl::*ready_cb_)();
+            void (OBDDeviceImpl::*error_cb_)();
+        };
+
+        void enqueueCommand(Command&& cmd);
+        Q_INVOKABLE void processCmdQueue();
+
+        void processResponse(const QByteArray& buffer);
         bool onATZLine(const char* line);
-        bool onATZReady();
+        void onATZReady();
         bool onOKLine(const char* line);
-        bool onATALReady();
-        bool onATSP0Ready();
+        void onATALReady();
+        void onATSP0Ready();
         void openFailed();
         bool onQueryLine(const char* line);
-        bool onQueryReady();
+        void onQueryReady();
         void queryFailed();
 
         OBDDevice* interface_;
@@ -52,31 +66,21 @@ namespace obdlib {
 
         QByteArray read_buffer_;
 
-        //! Last command to recognize echo
-        QByteArray current_cmd_;
+        std::queue<Command> cmd_queue_;
+
         //! Last query PID
         int current_pid_;
-
-        bool (Impl::*line_cb_)(const char *);
-        bool (Impl::*ready_cb_)();
-        void (Impl::*error_cb_)();
-        bool error_on_read_;
 
         //! Timeout timer for the active command
         QTimer* timeout_timer_;
     };
 
 
-    enum class OBDBytes : char
-    {
-        ShowCurrentMode = 0x01,
-        ReplyCurrentMode = 0x41,
-    };
 
 
     OBDDevice::OBDDevice(QObject* parent)
         : QObject(parent)
-        , pimpl_(std::make_unique<Impl>(this))
+        , pimpl_(std::make_unique<OBDDeviceImpl>(this))
     {
 
     }
@@ -101,17 +105,13 @@ namespace obdlib {
         return pimpl_->queryValue(pid);
     }
 
-    OBDDevice::Impl::Impl(OBDDevice* interface)
+    OBDDeviceImpl::OBDDeviceImpl(OBDDevice* interface)
         : QObject()
         , interface_(interface)
         , sp_()
         , read_buffer_()
-        , current_cmd_()
-        , current_pid_(PID_Invalid)
-        , line_cb_(nullptr)
-        , ready_cb_(nullptr)
-        , error_cb_(nullptr)
-        , error_on_read_(false)
+        , cmd_queue_()
+        , current_pid_(OBDDevice::PID_Invalid)
         , timeout_timer_(nullptr)
     {
         connect(&sp_, SIGNAL(readyRead()),
@@ -124,20 +124,20 @@ namespace obdlib {
                 this, SLOT(onTimeout()));
 
         // All signals emitted by the device are deferred
-        connect(this, SIGNAL(internalSignalOnOpen(bool)),
+        connect(this, SIGNAL(queueOnOpenSignal(bool)),
                 interface_, SIGNAL(onOpen(bool)), Qt::QueuedConnection);
-        connect(this, SIGNAL(internalSignalOnQueryValue(bool,int,QVariant)),
+        connect(this, SIGNAL(queueOnQueryValueSignal(bool,int,QVariant)),
                 interface_, SIGNAL(onQueryValue(bool,int,QVariant)), Qt::QueuedConnection);
     }
 
-    OBDDevice::Impl::~Impl()
+    OBDDeviceImpl::~OBDDeviceImpl()
     {
 
     }
 
-    bool OBDDevice::Impl::open(const QString& name)
+    bool OBDDeviceImpl::open(const QString& name)
     {
-        if (line_cb_ != nullptr)
+        if (!cmd_queue_.empty())
             return false;
         if (sp_.isOpen())
             return false;
@@ -152,165 +152,157 @@ namespace obdlib {
         r = r && sp_.setFlowControl(QSerialPort::NoFlowControl);
 
         r = r && sp_.open(QSerialPort::ReadWrite);
-        r = r && send("ATZ",
-                      &Impl::onATZLine,
-                      &Impl::onATZReady,
-                      &Impl::openFailed);
+        enqueueCommand(Command {
+                           "ATZ",
+                            &OBDDeviceImpl::onATZLine,
+                            &OBDDeviceImpl::onATZReady,
+                            &OBDDeviceImpl::openFailed
+                       });
         if (!r)
             sp_.close();
         return r;
     }
 
-    bool OBDDevice::Impl::send(const char* cmd,
-                               bool (Impl::*line_cb)(const char *),
-                               bool (Impl::*ready_cb)(),
-                               void (Impl::*error_cb)())
+    void OBDDeviceImpl::enqueueCommand(Command &&cmd)
     {
-        assert(line_cb_ == nullptr);
-        assert(ready_cb_ == nullptr);
-        assert(error_cb_ == nullptr);
-
-        QByteArray buffer;
-        buffer.append(cmd);
-        buffer.append('\r');
-        if (sp_.write(buffer) != buffer.size())
-            return false;
-
-        current_cmd_ = cmd;
-        line_cb_ = line_cb;
-        ready_cb_ = ready_cb;
-        error_cb_ = error_cb;
-        timeout_timer_->start();
-        return true;
+        cmd_queue_.push(std::move(cmd));
+        QMetaObject::invokeMethod(this, "processCmdQueue", Qt::QueuedConnection);
     }
 
-    void OBDDevice::Impl::onReadyRead()
+    void OBDDeviceImpl::processCmdQueue()
     {
-        // Process all non-empty response lines one-by-one
+        assert(!cmd_queue_.empty());
+        const auto& active_cmd = cmd_queue_.front();
+
+        QByteArray buffer;
+        buffer.append(active_cmd.cmd_str_);
+        buffer.append('\r');
+        if (sp_.write(buffer) != buffer.size()) {
+            (this->*(active_cmd.error_cb_))();
+            cmd_queue_.pop();
+            return;
+        }
+
+        timeout_timer_->start();
+    }
+
+    void OBDDeviceImpl::onReadyRead()
+    {
         int from = read_buffer_.size();
         read_buffer_.append(sp_.readAll());
+
         for (;;) {
-            const auto len = read_buffer_.indexOf('\r', from);
+            // Look for the prompt sign
+            const auto len = read_buffer_.indexOf("\r>", from);
             if (len == -1)
                 break;
 
             if (len > 0) {
-                read_buffer_[len] = 0;
-                processLine(read_buffer_.constData());
+                processResponse(read_buffer_.left(len));
             }
-            read_buffer_.remove(0, len + 1);
+            read_buffer_.remove(0, len + 2);
             from = 0;
         }
-
-        // Process prompt sign
-        if (read_buffer_.size() == 1 &&
-            read_buffer_[0] == '>') {
-            read_buffer_.clear();
-            processPrompt();
-        }
     }
 
-    void OBDDevice::Impl::processLine(const char* line)
+    void OBDDeviceImpl::processResponse(const QByteArray& buffer)
     {
-        assert(line_cb_ != nullptr);
-        assert(error_cb_ != nullptr);
+        //qDebug() << buffer;
 
-        // Skip echo from the device
-        if (strcmp(line, current_cmd_.constData()) == 0)
-            return;
+        assert(!cmd_queue_.empty());
+        const auto& active_cmd = cmd_queue_.front();
 
-        if (!error_on_read_) {
-            if (!(this->*line_cb_)(line)) {
-                error_on_read_ = true;
-                (this->*error_cb_)();
-            }
-        }
-    }
-
-    void OBDDevice::Impl::processPrompt()
-    {
-        assert(ready_cb_ != nullptr);
-        assert(error_cb_ != nullptr);
-
+        auto error = false;
         timeout_timer_->stop();
 
-        line_cb_ = nullptr;
-        const auto ready_cb = ready_cb_;
-        ready_cb_ = nullptr;
-        const auto error_cb = error_cb_;
-        error_cb_ = nullptr;
+        // Process all non-empty lines
+        const auto& lines = buffer.split('\r');
+        for (const auto& line : lines) {
+            if (!line.isEmpty()) {
+                // Skip echo from the device
+                if (line == active_cmd.cmd_str_)
+                    continue;
 
-        if (!error_on_read_) {
-            if (!(this->*ready_cb)()) {
-                error_on_read_ = true;
-                (this->*error_cb)();
+                if (!(this->*(active_cmd.line_cb_))(line)) {
+                    error = true;
+                    break;
+                }
             }
         }
 
-        // Command processing is finished here, reset the error flag
-        error_on_read_ = false;
+        if (error) {
+            (this->*(active_cmd.error_cb_))();
+        } else {
+            (this->*(active_cmd.ready_cb_))();
+        }
+
+        cmd_queue_.pop();
     }
 
-    void OBDDevice::Impl::onTimeout()
+    void OBDDeviceImpl::onTimeout()
     {
-        error_on_read_ = true;
-        (this->*error_cb_)();
+        assert(!cmd_queue_.empty());
+        const auto& active_cmd = cmd_queue_.front();
+
+        (this->*(active_cmd.error_cb_))();
+        cmd_queue_.pop();
     }
 
-    bool OBDDevice::Impl::onATZLine(const char* line)
+    bool OBDDeviceImpl::onATZLine(const char* line)
     {
         static const char id_str[] = "ELM327";
 
         return strncmp(line, id_str, sizeof(id_str) - 1) == 0;
     }
 
-    bool OBDDevice::Impl::onATZReady()
+    void OBDDeviceImpl::onATZReady()
     {
-        return send("ATAL",
-                    &Impl::onOKLine,
-                    &Impl::onATALReady,
-                    &Impl::openFailed);
+        enqueueCommand(Command {
+                           "ATAL",
+                            &OBDDeviceImpl::onOKLine,
+                            &OBDDeviceImpl::onATALReady,
+                            &OBDDeviceImpl::openFailed
+                       });
     }
 
-    bool OBDDevice::Impl::onOKLine(const char* line)
+    bool OBDDeviceImpl::onOKLine(const char* line)
     {
         return strcmp(line, "OK") == 0;
     }
 
-    bool OBDDevice::Impl::onATALReady()
+    void OBDDeviceImpl::onATALReady()
     {
-        return send("ATSP0",
-                    &Impl::onOKLine,
-                    &Impl::onATSP0Ready,
-                    &Impl::openFailed);
+        enqueueCommand(Command {
+                           "ATSP0",
+                            &OBDDeviceImpl::onOKLine,
+                            &OBDDeviceImpl::onATSP0Ready,
+                            &OBDDeviceImpl::openFailed
+                       });
     }
 
-    bool OBDDevice::Impl::onATSP0Ready()
+    void OBDDeviceImpl::onATSP0Ready()
     {
-        emit internalSignalOnOpen(true);
-        return true;
+        emit queueOnOpenSignal(true);
     }
 
-    void OBDDevice::Impl::openFailed()
+    void OBDDeviceImpl::openFailed()
     {
         sp_.close();
-        emit internalSignalOnOpen(false);
+        emit queueOnOpenSignal(false);
     }
 
-    void OBDDevice::Impl::close()
+    void OBDDeviceImpl::close()
     {
         sp_.close();
         read_buffer_.clear();
-        current_cmd_.clear();
-        line_cb_ = nullptr;
-        ready_cb_ = nullptr;
-        error_cb_ = nullptr;
+        while (!cmd_queue_.empty())
+            cmd_queue_.pop();
         timeout_timer_->stop();
     }
 
-    bool OBDDevice::Impl::queryValue(PID pid)
+    bool OBDDeviceImpl::queryValue(OBDDevice::PID pid)
     {
-        if (line_cb_ != nullptr)
+        if (!cmd_queue_.empty())
             return false;
         if (!sp_.isOpen())
             return false;
@@ -319,15 +311,18 @@ namespace obdlib {
 
         current_pid_ = pid;
 
-        const auto cmd = QString("%1%2")
+        auto cmd = QString("%1%2")
                 .arg(static_cast<char>(OBDBytes::ShowCurrentMode), 2, 16, QChar('0'))
                 .arg(static_cast<char>(pid), 2, 16, QChar('0'))
                 .toLatin1();
 
-        return send(cmd.data(),
-                    &Impl::onQueryLine,
-                    &Impl::onQueryReady,
-                    &Impl::queryFailed);
+        enqueueCommand(Command {
+                           std::move(cmd),
+                            &OBDDeviceImpl::onQueryLine,
+                            &OBDDeviceImpl::onQueryReady,
+                            &OBDDeviceImpl::queryFailed
+                       });
+        return true;
     }
 
     static inline int getHexDigitValue(char c)
@@ -360,7 +355,7 @@ namespace obdlib {
         return r;
     }
 
-    bool OBDDevice::Impl::onQueryLine(const char* line)
+    bool OBDDeviceImpl::onQueryLine(const char* line)
     {
         if (strcmp(line, "SEARCHING...") == 0)
             return true;
@@ -372,16 +367,16 @@ namespace obdlib {
 
         if (len >= 2) {
             const auto mode = static_cast<OBDBytes>(buffer[0]);
-            const auto pid = static_cast<PID>(buffer[1]);
+            const auto pid = static_cast<OBDDevice::PID>(buffer[1]);
             if (mode == OBDBytes::ReplyCurrentMode) {
                 QVariant value;
 
                 switch (pid) {
-                case PID_EngineRPM:
+                case OBDDevice::PID_EngineRPM:
                     if (len >= 4)
                         value = (buffer[2] * 256 + buffer[3]) / 4;
                     break;
-                case PID_VehicleSpeed:
+                case OBDDevice::PID_VehicleSpeed:
                     if (len >= 3)
                         value = buffer[2];
                     break;
@@ -391,7 +386,7 @@ namespace obdlib {
                 }
 
                 if (!value.isNull()) {
-                    emit internalSignalOnQueryValue(true, pid, value);
+                    emit queueOnQueryValueSignal(true, pid, value);
                     return true;
                 }
             }
@@ -400,15 +395,15 @@ namespace obdlib {
         return false;
     }
 
-    bool OBDDevice::Impl::onQueryReady()
+    void OBDDeviceImpl::onQueryReady()
     {
-        return true;
+
     }
 
-    void OBDDevice::Impl::queryFailed()
+    void OBDDeviceImpl::queryFailed()
     {
         sp_.close();
-        emit internalSignalOnQueryValue(false, current_pid_, QVariant());
+        emit queueOnQueryValueSignal(false, current_pid_, QVariant());
     }
 }
 

@@ -7,6 +7,8 @@
 
 namespace obdlib {
 
+    class OBDDeviceImpl;
+
     class OBDDevice : public QObject
     {
         Q_OBJECT
@@ -32,8 +34,7 @@ namespace obdlib {
         void onQueryValue(bool ok, int pid, const QVariant& value);
 
     private:
-        class Impl;
-        std::unique_ptr<Impl> pimpl_;
+        std::unique_ptr<OBDDeviceImpl> pimpl_;
     };
 
 }
