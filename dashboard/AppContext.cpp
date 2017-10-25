@@ -11,12 +11,15 @@ AppContext::AppContext(QObject* parent)
     : QObject(parent)
     , rpmValue_(0)
     , message_()
+    , fpsValue_(0)
     , device_(std::make_unique<obdlib::OBDDevice>())
     , error_timer_(nullptr)
     , remaining_seconds_(0)
     , error_message_()
     , querying_(false)
     , query_timer_(nullptr)
+    , fps_timer_(nullptr)
+    , num_queries_(0)
 {
     connect(device_.get(), SIGNAL(onOpen(bool)),
             this, SLOT(onDeviceOpen(bool)));
@@ -31,6 +34,11 @@ AppContext::AppContext(QObject* parent)
     query_timer_->setInterval(100);
     connect(query_timer_, SIGNAL(timeout()),
             this, SLOT(onQueryTimer()));
+    fps_timer_ = new QTimer(this);
+    fps_timer_->setInterval(1000);
+    connect(fps_timer_, SIGNAL(timeout()),
+            this, SLOT(onFpsTimer()));
+    fps_timer_->start();
 }
 
 AppContext::~AppContext()
@@ -48,6 +56,11 @@ QString AppContext::message() const
     return message_;
 }
 
+int AppContext::fpsValue() const
+{
+    return fpsValue_;
+}
+
 void AppContext::setRpmValue(int rpmValue)
 {
     if (rpmValue_ != rpmValue) {
@@ -61,6 +74,14 @@ void AppContext::setMessage(QString message)
     if (message_ != message) {
         message_ = message;
         emit messageChanged(message);
+    }
+}
+
+void AppContext::setFpsValue(int fpsValue)
+{
+    if (fpsValue_ != fpsValue) {
+        fpsValue_ = fpsValue;
+        emit fpsValueChanged(fpsValue);
     }
 }
 
@@ -142,6 +163,12 @@ void AppContext::onDeviceQuery(bool ok, int pid, const QVariant& value)
         return;
 
     setRpmValue(value.toInt());
+    num_queries_++;
+
+    if (!device_->queryValue(obdlib::OBDDevice::PID_EngineRPM)) {
+        queryFailed();
+        return;
+    }
 }
 
 void AppContext::queryFailed()
@@ -154,4 +181,10 @@ void AppContext::queryFailed()
 void AppContext::start()
 {
     tryConnect();
+}
+
+void AppContext::onFpsTimer()
+{
+    setFpsValue(num_queries_);
+    num_queries_ = 0;
 }

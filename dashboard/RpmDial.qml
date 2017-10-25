@@ -39,6 +39,18 @@ Window {
             visible: false
         }
 
+        Text {
+            id: fpsLabel
+            text: "FPS: " + appContext.fpsValue
+            anchors.left: parent.left
+            anchors.leftMargin: 10
+            anchors.top: parent.top
+            anchors.topMargin: 10
+            font.family: "Verdana"
+            font.pixelSize: 24
+            color: "yellow"
+        }
+
         states: [
             State {
                 name: "showingMessage"
