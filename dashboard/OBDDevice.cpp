@@ -144,6 +144,7 @@ namespace obdlib {
         sp_.setPortName(name);
 
         bool r = true;
+        // Hardcoded parameters for ELM327 v1.5 (Chinese clone version)
         r = r && sp_.setBaudRate(QSerialPort::Baud38400);
         r = r && sp_.setDataBits(QSerialPort::Data8);
         r = r && sp_.setParity(QSerialPort::NoParity);
@@ -165,6 +166,7 @@ namespace obdlib {
     void OBDDeviceImpl::enqueueCommand(Command &&cmd)
     {
         cmd_queue_.push(std::move(cmd));
+        // Defer processing the queue to the next main loop iteration
         QMetaObject::invokeMethod(this, "processCmdQueue", Qt::QueuedConnection);
     }
 
@@ -173,6 +175,7 @@ namespace obdlib {
         assert(!cmd_queue_.empty());
         const auto& active_cmd = cmd_queue_.front();
 
+        // Send command
         QByteArray buffer;
         buffer.append(active_cmd.cmd_str_);
         buffer.append('\r');
@@ -189,6 +192,7 @@ namespace obdlib {
     {
         auto new_buffer = sp_.readAll();
 
+        // Print response to stdout
         std::cout << QString::fromLatin1(new_buffer.constData())
                      .replace("\r", "\r\n")
                      .toLatin1()
