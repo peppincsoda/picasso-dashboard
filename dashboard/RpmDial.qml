@@ -23,6 +23,8 @@ Window {
             height: width
             anchors.centerIn: parent
 
+            maximumValue: 60
+
             Text {
                 text: "RPM<br>x100"
                 color: "white"
