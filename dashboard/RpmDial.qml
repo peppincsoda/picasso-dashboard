@@ -7,9 +7,9 @@ import app 1.0
 Window {
     id: root
     visible: true
-    //visibility: "FullScreen"
-    width: 800
-    height: 600
+    visibility: "FullScreen"
+    width: 600
+    height: 480
     color: "black"
 
     Item {
