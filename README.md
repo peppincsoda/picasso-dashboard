@@ -5,7 +5,7 @@ This application can display an RPM gauge in your car.
 (My car did not have an RPM gauge by design.)
 
 The software is platform independent and open-source.
-It uses Qt5: Technically the dial on the screen is a CircularGauge instance from QtQuick 2 Extras
+It uses Qt5: Technically the dial on the screen is a CircularGauge instance from QtQuick Extras
 and all serial communication is handled asynchronously by QSerialPort.
 
 ## Demo
