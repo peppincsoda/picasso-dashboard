@@ -378,6 +378,12 @@ namespace obdlib {
             return true;
         if (strcmp(line, "UNABLE TO CONNECT") == 0)
             return false;
+        if (strcmp(line, "BUS ERROR") == 0)
+            return false;
+        if (strcmp(line, "NO DATA") == 0) {
+            emit queueOnQueryValueSignal(true, current_pid_, QVariant());
+            return true;
+        }
 
         const auto buffer = readHexBytes(line);
         const auto len = buffer.size();
