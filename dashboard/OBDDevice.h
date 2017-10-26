@@ -29,6 +29,8 @@ namespace obdlib {
 
         bool queryValue(PID pid);
 
+        void setLogOutput(void (*write_fn)(const char*));
+
     Q_SIGNALS:
         void onOpen(bool ok);
         void onQueryValue(bool ok, int pid, const QVariant& value);

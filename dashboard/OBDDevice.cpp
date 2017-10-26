@@ -6,7 +6,6 @@
 
 #include <cassert>
 #include <queue>
-#include <iostream>
 
 namespace obdlib {
 
@@ -21,6 +20,8 @@ namespace obdlib {
         void close();
 
         bool queryValue(OBDDevice::PID pid);
+
+        void setLogOutput(void (*write_fn)(const char*));
 
     Q_SIGNALS:
         void queueOnOpenSignal(bool ok);
@@ -72,6 +73,8 @@ namespace obdlib {
 
         //! Timeout timer for the active command
         QTimer* timeout_timer_;
+
+        void (*log_write_fn_)(const char*);
     };
 
 
@@ -104,6 +107,11 @@ namespace obdlib {
         return pimpl_->queryValue(pid);
     }
 
+    void OBDDevice::setLogOutput(void (*write_fn)(const char *))
+    {
+        pimpl_->setLogOutput(write_fn);
+    }
+
     OBDDeviceImpl::OBDDeviceImpl(OBDDevice* interface)
         : QObject()
         , interface_(interface)
@@ -112,6 +120,7 @@ namespace obdlib {
         , cmd_queue_()
         , current_pid_(OBDDevice::PID_Invalid)
         , timeout_timer_(nullptr)
+        , log_write_fn_(nullptr)
     {
         connect(&sp_, SIGNAL(readyRead()),
                 this, SLOT(onReadyRead()));
@@ -192,11 +201,13 @@ namespace obdlib {
     {
         auto new_buffer = sp_.readAll();
 
-        // Print response to stdout
-        std::cout << QString::fromLatin1(new_buffer.constData())
-                     .replace("\r", "\r\n")
-                     .toLatin1()
-                     .constData();
+        // Print response to log
+        if (log_write_fn_ != nullptr) {
+            log_write_fn_(QString::fromLatin1(new_buffer.constData())
+                          .replace("\r", "\r\n")
+                          .toLatin1()
+                          .constData());
+        }
 
         read_buffer_.append(std::move(new_buffer));
 
@@ -411,6 +422,11 @@ namespace obdlib {
     {
         sp_.close();
         emit queueOnQueryValueSignal(false, current_pid_, QVariant());
+    }
+
+    void OBDDeviceImpl::setLogOutput(void (*write_fn)(const char*))
+    {
+        log_write_fn_ = write_fn;
     }
 }
 

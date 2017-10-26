@@ -6,6 +6,20 @@
 
 #include "OBDDevice.h"
 
+#include <iostream>
+
+bool AppContext::quietOption_ = false;
+
+void AppContext::setQuietOption(bool quietOption)
+{
+    quietOption_ = quietOption;
+}
+
+static void write_to_stdout(const char* str)
+{
+    std::cout << str;
+}
+
 AppContext::AppContext(QObject* parent)
     : QObject(parent)
     , rpmValue_(0)
@@ -32,6 +46,10 @@ AppContext::AppContext(QObject* parent)
     connect(fps_timer_, SIGNAL(timeout()),
             this, SLOT(onFpsTimer()));
     fps_timer_->start();
+
+    if (!quietOption_) {
+        device_->setLogOutput(write_to_stdout);
+    }
 }
 
 AppContext::~AppContext()

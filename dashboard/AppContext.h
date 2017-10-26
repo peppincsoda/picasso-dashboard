@@ -19,6 +19,8 @@ class AppContext : public QObject
     Q_PROPERTY(int fpsValue READ fpsValue NOTIFY fpsValueChanged)
 
 public:
+    static void setQuietOption(bool quietOption);
+
     AppContext(QObject* parent = nullptr);
     ~AppContext();
 
@@ -49,6 +51,8 @@ private:
     void updateErrorMessage();
     void openFailed();
     void queryFailed();
+
+    static bool quietOption_;
 
     int rpmValue_;
     QString message_;
